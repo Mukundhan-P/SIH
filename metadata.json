@@ -1,0 +1,10 @@
+{
+  "name": "HaloHex AI Career Mentor",
+  "description": "An advanced expert AI Career Guidance Chatbot, academic counselor, technical tutor, mock interviewer, resume ATS optimizer, and personalized study planner.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

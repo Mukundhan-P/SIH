@@ -1,0 +1,58 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Account",
+      "description": "User login credentials, progress tracker, and profile settings",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique user identifier"
+        },
+        "email": {
+          "type": "string",
+          "description": "Registered email address"
+        },
+        "fullName": {
+          "type": "string",
+          "description": "User's full display name"
+        },
+        "passwordHash": {
+          "type": "string",
+          "description": "PBKDF2 secure password hash"
+        },
+        "passwordSalt": {
+          "type": "string",
+          "description": "Secure random salt used in hashing"
+        },
+        "failedAttempts": {
+          "type": "integer",
+          "description": "Count of consecutive failed login attempts"
+        },
+        "lockoutUntil": {
+          "type": "integer",
+          "description": "Timestamp when account lockout expires"
+        },
+        "sessionToken": {
+          "type": "string",
+          "description": "Secure dynamic active session token"
+        },
+        "profile": {
+          "type": "object",
+          "description": "User profile attributes"
+        },
+        "userData": {
+          "type": "object",
+          "description": "Progress, structures, and logs"
+        }
+      },
+      "required": ["id", "email", "fullName", "passwordHash", "passwordSalt"]
+    }
+  },
+  "firestore": {
+    "users/{userId}": {
+      "schema": "User",
+      "description": "Collection of registered user documents"
+    }
+  }
+}
