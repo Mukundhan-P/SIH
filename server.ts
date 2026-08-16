@@ -9,7 +9,7 @@ import fs from "fs";
 
 // --- Firebase SDK Imports ---
 import { initializeApp, getApp, getApps } from "firebase/app";
-import { getFirestore, doc, getDoc, setDoc, collection, query, where, getDocs } from "firebase/firestore";
+import { getFirestore, doc, getDoc, setDoc, collection, query, where, getDocs, updateDoc, increment, orderBy, limit, arrayUnion, getCountFromServer } from "firebase/firestore";
 
 dns.setDefaultResultOrder("ipv4first");
 
@@ -35,6 +35,8 @@ interface UserRecord {
     searchHistory?: string[];
     userActions?: any[];
     xp?: number;
+    points?: number;
+    awardedEvents?: string[];
   };
   sessionToken?: string;
 }
@@ -82,6 +84,46 @@ function initFirebase() {
 
 // Pre-initialize check on startup
 initFirebase();
+
+// ── Auto-clean fake/seeded gamification docs on startup ─────────────────────
+// Runs once, 5 seconds after startup, deletes any gamification docs whose ID
+// doesn't correspond to a real registered user in the users collection.
+async function cleanFakeLeaderboardData() {
+  try {
+    const db = initFirebase();
+    if (!db || !isFirebaseEnabled) return;
+
+    const { deleteDoc: _del } = await import("firebase/firestore");
+
+    const [usersSnap, gamSnap] = await Promise.all([
+      getDocs(collection(db, "users")),
+      getDocs(collection(db, "gamification")),
+    ]);
+
+    const realUserIds = new Set(usersSnap.docs.map(d => d.id));
+    let deletedCount = 0;
+
+    for (const gamDoc of gamSnap.docs) {
+      if (!realUserIds.has(gamDoc.id)) {
+        await _del(doc(db, "gamification", gamDoc.id));
+        console.log(`[STARTUP-CLEAN] Removed fake leaderboard entry: ${gamDoc.id} (${gamDoc.data().name || 'unknown'})`);
+        deletedCount++;
+      }
+    }
+
+    if (deletedCount > 0) {
+      console.log(`[STARTUP-CLEAN] ✅ Cleaned ${deletedCount} fake gamification entries.`);
+    } else {
+      console.log(`[STARTUP-CLEAN] Leaderboard is clean — no fake entries found.`);
+    }
+  } catch (err) {
+    // Non-fatal: log but don't crash server
+    console.warn("[STARTUP-CLEAN] Could not clean leaderboard (rules may block):", (err as any)?.message || err);
+  }
+}
+
+// Run cleanup 5 seconds after startup (gives Firebase time to init)
+setTimeout(cleanFakeLeaderboardData, 5000);
 
 // Helper to read users from local file (as safety fallback)
 function readUsers(): UserRecord[] {
@@ -582,35 +624,231 @@ app.post("/api/user/data", async (req: Request, res: Response) => {
   }
 });
 
-// 9. GET Leaderboard (all users XP, public)
-app.get("/api/leaderboard", async (req: Request, res: Response) => {
+
+// 9. GET Leaderboard — reads from `users` collection (always writable) ordered by points
+app.get("/api/leaderboard", async (_req: Request, res: Response) => {
   try {
     const db = initFirebase();
+    // Always derive leaderboard from the `users` collection since gamification
+    // collection may have restrictive write rules. Users collection is always current.
     let users: UserRecord[] = [];
     if (db && isFirebaseEnabled) {
-      const querySnapshot = await getDocs(collection(db, "users"));
-      users = querySnapshot.docs.map(d => ({ id: d.id, ...d.data() } as UserRecord));
+      try {
+        const querySnapshot = await getDocs(collection(db, "users"));
+        users = querySnapshot.docs.map(d => ({ id: d.id, ...d.data() } as UserRecord));
+      } catch (e) {
+        console.error("[LEADERBOARD] Firestore read failed, using local fallback:", e);
+        users = readUsers();
+      }
     } else {
       users = readUsers();
     }
+
     const leaderboard = users
-      .filter(u => u.email !== 'guest@halohex.com' && (u.userData?.xp ?? 0) > 0)
-      .map(u => ({
-        name: u.fullName,
-        email: u.email,
-        xp: u.userData?.xp,
-        college: u.profile?.college || '',
-        dreamCareer: u.profile?.dreamCareer || '',
-      }))
-      .sort((a, b) => b.xp - a.xp);
-    res.json({ leaderboard });
+      .filter(u => (u.userData?.points ?? u.userData?.xp ?? 0) > 0)
+      .map(u => {
+        const pts = u.userData?.points || u.userData?.xp || 0;
+        const awarded = u.userData?.awardedEvents || [];
+        const lvl = computeLevel(pts);
+        const completedDays = Object.values(u.userData?.progress || {}).reduce(
+          (acc: number, p: any) => acc + (p?.completedDays?.length || 0), 0
+        );
+        const quizzesPassed = Object.values(u.userData?.progress || {}).reduce(
+          (acc: number, p: any) => acc + Object.values(p?.quizScores || {}).filter((s: any) => s >= 60).length, 0
+        );
+        // Compute medals
+        const medals: string[] = [];
+        const interviewDone = awarded.some((e: string) => e.startsWith('interview_complete'));
+        const resumeScanned = awarded.some((e: string) => e.startsWith('resume_scan'));
+        if (pts >= 10) medals.push('first_steps');
+        if (completedDays >= 1) medals.push('scholar');
+        if (quizzesPassed >= 1) medals.push('quiz_ace');
+        if (resumeScanned) medals.push('ats');
+        if (interviewDone) medals.push('warrior');
+        if (pts >= 300) medals.push('explorer');
+        if (pts >= 600) medals.push('specialist');
+        if (pts >= 1000) medals.push('elite');
+        if (pts >= 2000) medals.push('master');
+
+        return {
+          uid: u.id,
+          name: u.fullName,
+          email: u.email,
+          points: pts,
+          level: lvl.level,
+          levelTitle: lvl.title,
+          college: u.profile?.college || '',
+          dreamCareer: u.profile?.dreamCareer || '',
+          completedDays,
+          quizzesPassed,
+          interviewDone,
+          resumeScanned,
+          medals,
+          updatedAt: Date.now(),
+        };
+      })
+      .sort((a, b) => b.points - a.points)
+      .slice(0, 100);
+
+    return res.json({ leaderboard });
   } catch (err) {
     console.error("Leaderboard fetch error:", err);
     res.status(500).json({ error: "Failed to fetch leaderboard." });
   }
 });
 
-// 10. POST Update user XP
+// 10a. POST Award Gamification Points — server-validated, Firestore atomic writes
+app.post("/api/gamification/award", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Access token required." });
+    }
+    const token = authHeader.split(" ")[1];
+    const session = await getSession(token);
+    if (!session) return res.status(401).json({ error: "Invalid token." });
+
+    const { event, contextId } = req.body;
+    if (!event || !contextId) return res.status(400).json({ error: "event and contextId required." });
+
+    const pointsToAdd = SERVER_POINT_VALUES[event];
+    if (pointsToAdd === undefined) return res.status(400).json({ error: "Unknown event type." });
+
+    const user = await findUserById(session.userId);
+    if (!user) return res.status(404).json({ error: "User not found." });
+
+    const dedupeKey = `${event}::${contextId}`;
+
+    const db = initFirebase();
+    if (db && isFirebaseEnabled) {
+      // ── Firestore path: atomic increment + arrayUnion dedup ──────────────
+      const userInfo = {
+        name: user.fullName, email: user.email,
+        college: user.profile?.college || '',
+        dreamCareer: user.profile?.dreamCareer || '',
+      };
+      const gamData = await getOrInitGamificationDoc(db, session.userId, userInfo);
+
+      // Server-side dedup check
+      const alreadyAwarded = Array.isArray(gamData.awardedEvents) && gamData.awardedEvents.includes(dedupeKey);
+      if (alreadyAwarded) {
+        return res.json({ success: false, reason: "already_awarded", totalPoints: gamData.points });
+      }
+
+      const statUpdates: any = {};
+      if (["topic_complete","roadmap_complete","quiz_pass","quiz_perfect"].includes(event)) statUpdates.completedDays = 1;
+      if (["quiz_pass","quiz_perfect"].includes(event)) statUpdates.quizzesPassed = 1;
+
+      const newPoints = (gamData.points || 0) + pointsToAdd;
+      const newLevel  = computeLevel(newPoints);
+      const newCompleted  = (gamData.completedDays  || 0) + (statUpdates.completedDays  || 0);
+      const newQuizPassed = (gamData.quizzesPassed  || 0) + (statUpdates.quizzesPassed  || 0);
+      const newInterviewDone  = gamData.interviewDone  || event === "interview_complete";
+      const newResumeScanned  = gamData.resumeScanned  || event === "resume_scan";
+
+      const medals: string[] = [];
+      if (newPoints >= 10)       medals.push("first_steps");
+      if (newCompleted  >= 1)    medals.push("scholar");
+      if (newQuizPassed >= 1)    medals.push("quiz_ace");
+      if (newResumeScanned)      medals.push("ats");
+      if (newInterviewDone)      medals.push("warrior");
+      if (newPoints >= 300)      medals.push("explorer");
+      if (newPoints >= 600)      medals.push("specialist");
+      if (newPoints >= 1000)     medals.push("elite");
+      if (newPoints >= 2000)     medals.push("master");
+
+      const updatePayload: any = {
+        uid:          session.userId,
+        points:       increment(pointsToAdd),
+        level:        newLevel.level,
+        levelTitle:   newLevel.title,
+        completedDays:  increment(statUpdates.completedDays  || 0),
+        quizzesPassed:  increment(statUpdates.quizzesPassed  || 0),
+        medals,
+        updatedAt:    Date.now(),
+        awardedEvents: arrayUnion(dedupeKey),
+        name:         userInfo.name,
+        email:        userInfo.email,
+        college:      userInfo.college,
+        dreamCareer:  userInfo.dreamCareer,
+      };
+      if (event === "interview_complete") updatePayload.interviewDone = true;
+      if (event === "resume_scan")        updatePayload.resumeScanned = true;
+
+      const gamRef = doc(db, "gamification", session.userId);
+      try {
+        // Use setDoc with merge:true — works whether doc exists or not
+        await setDoc(gamRef, updatePayload, { merge: true });
+        console.log(`[GAMIFICATION] ✅ Firestore write OK — +${pointsToAdd}pts (${event}) for ${user.email} → total ~${newPoints}`);
+      } catch (fsErr: any) {
+        console.error(`[GAMIFICATION] ❌ Firestore write FAILED for ${user.email}:`, fsErr?.message || fsErr);
+        // Still save locally even if Firestore fails
+      }
+
+      // Also update the users collection for backward compat
+      user.userData = {
+        ...(user.userData || {}),
+        points: newPoints,
+        xp: newPoints,
+        awardedEvents: [...(gamData.awardedEvents || []), dedupeKey],
+      };
+      await saveUser(user);
+
+      console.log(`[GAMIFICATION] +${pointsToAdd}pts (${event}) for ${user.email} → total ${newPoints}`);
+      return res.json({ success: true, pointsAwarded: pointsToAdd, totalPoints: newPoints, level: newLevel });
+    }
+
+    // ── Fallback: JSON-file only path ────────────────────────────────────────
+    const awardedEvents: string[] = user.userData?.awardedEvents || [];
+    if (awardedEvents.includes(dedupeKey)) {
+      return res.json({ success: false, reason: "already_awarded", totalPoints: user.userData?.points || 0 });
+    }
+    const currentPoints = user.userData?.points || 0;
+    const newPoints = currentPoints + pointsToAdd;
+    user.userData = {
+      ...(user.userData || {}),
+      points: newPoints, xp: newPoints,
+      awardedEvents: [...awardedEvents, dedupeKey],
+    };
+    await saveUser(user);
+    return res.json({ success: true, pointsAwarded: pointsToAdd, totalPoints: newPoints });
+  } catch (err) {
+    console.error("Gamification award error:", err);
+    res.status(500).json({ error: "Failed to award points." });
+  }
+});
+
+// 10b. GET current user's gamification stats
+app.get("/api/gamification/me", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Access token required." });
+    }
+    const token = authHeader.split(" ")[1];
+    const session = await getSession(token);
+    if (!session) return res.status(401).json({ error: "Invalid token." });
+
+    const user = await findUserById(session.userId);
+    if (!user) return res.status(404).json({ error: "User not found." });
+
+    const db = initFirebase();
+    if (db && isFirebaseEnabled) {
+      const gamRef = doc(db, "gamification", session.userId);
+      const snap = await getDoc(gamRef);
+      if (snap.exists()) {
+        const data = snap.data();
+        return res.json({ points: data.points || 0, level: data.level || 1, levelTitle: data.levelTitle || "Beginner", medals: data.medals || [], awardedEvents: data.awardedEvents || [] });
+      }
+    }
+    res.json({ points: user.userData?.points || 0, awardedEvents: user.userData?.awardedEvents || [] });
+  } catch (err) {
+    console.error("Gamification me error:", err);
+    res.status(500).json({ error: "Failed to fetch gamification data." });
+  }
+});
+
+// 10c. POST Update/sync leaderboard XP — bridge for profile refresh
 app.post("/api/leaderboard/xp", async (req: Request, res: Response) => {
   try {
     const authHeader = req.headers.authorization;
@@ -621,18 +859,88 @@ app.post("/api/leaderboard/xp", async (req: Request, res: Response) => {
     const session = await getSession(token);
     if (!session) return res.status(401).json({ error: "Invalid token." });
 
-    const { xp } = req.body;
-    if (typeof xp !== 'number') return res.status(400).json({ error: "XP value required." });
-
     const user = await findUserById(session.userId);
     if (!user) return res.status(404).json({ error: "User not found." });
 
-    user.userData = { ...(user.userData || {}), xp };
-    await saveUser(user);
+    const db = initFirebase();
+    if (db && isFirebaseEnabled) {
+      const userInfo = {
+        name: user.fullName, email: user.email,
+        college: user.profile?.college || '',
+        dreamCareer: user.profile?.dreamCareer || '',
+      };
+      const gamRef = doc(db, "gamification", session.userId);
+      const snap = await getDoc(gamRef);
+      if (!snap.exists()) {
+        await getOrInitGamificationDoc(db, session.userId, userInfo);
+      } else {
+        await updateDoc(gamRef, {
+          name: userInfo.name, email: userInfo.email,
+          college: userInfo.college, dreamCareer: userInfo.dreamCareer,
+          updatedAt: Date.now(),
+        });
+      }
+    }
+    // Also keep legacy xp field in sync
+    const { xp } = req.body;
+    if (typeof xp === "number") {
+      user.userData = { ...(user.userData || {}), xp };
+      await saveUser(user);
+    }
     res.json({ success: true });
   } catch (err) {
     console.error("XP update error:", err);
     res.status(500).json({ error: "Failed to update XP." });
+  }
+});
+
+// 10d. POST Clean leaderboard — removes fake/seeded gamification docs that don't
+//      correspond to real registered users in the users collection.
+app.post("/api/admin/clean-leaderboard", async (req: Request, res: Response) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Access token required." });
+    }
+    const token = authHeader.split(" ")[1];
+    const session = await getSession(token);
+    if (!session) return res.status(401).json({ error: "Invalid token." });
+
+    const db = initFirebase();
+    if (!db || !isFirebaseEnabled) {
+      return res.status(503).json({ error: "Firestore not available." });
+    }
+
+    // Get all real registered user IDs from the users collection
+    const usersSnap = await getDocs(collection(db, "users"));
+    const realUserIds = new Set(usersSnap.docs.map(d => d.id));
+
+    // Get all gamification docs
+    const gamSnap = await getDocs(collection(db, "gamification"));
+    const toDelete: string[] = [];
+
+    for (const gamDoc of gamSnap.docs) {
+      if (!realUserIds.has(gamDoc.id)) {
+        toDelete.push(gamDoc.id);
+      }
+    }
+
+    // Delete fake docs
+    const { deleteDoc } = await import("firebase/firestore");
+    for (const id of toDelete) {
+      await deleteDoc(doc(db, "gamification", id));
+      console.log(`[CLEAN-LEADERBOARD] Deleted fake gamification doc: ${id}`);
+    }
+
+    return res.json({
+      success: true,
+      deleted: toDelete.length,
+      deletedIds: toDelete,
+      message: `Removed ${toDelete.length} fake leaderboard entries.`
+    });
+  } catch (err) {
+    console.error("Clean leaderboard error:", err);
+    res.status(500).json({ error: "Failed to clean leaderboard." });
   }
 });
 
@@ -1943,6 +2251,58 @@ app.post("/api/locked-roadmap/evaluate-code", async (req: Request, res: Response
     res.status(500).json({ error: "Failed to evaluate code submission." });
   }
 });
+
+async function getOrInitGamificationDoc(db: any, userId: string, userInfo: { name: string; email: string; college: string; dreamCareer: string }) {
+  const docRef = doc(db, 'gamification', userId);
+  const snap = await getDoc(docRef);
+  if (!snap.exists()) {
+    const initial = {
+      uid: userId,
+      name: userInfo.name,
+      email: userInfo.email,
+      college: userInfo.college || '',
+      dreamCareer: userInfo.dreamCareer || '',
+      points: 0,
+      level: 1,
+      levelTitle: 'Beginner',
+      completedDays: 0,
+      quizzesPassed: 0,
+      interviewDone: false,
+      resumeScanned: false,
+      awardedEvents: [],
+      medals: [],
+      updatedAt: Date.now(),
+    };
+    await setDoc(docRef, initial);
+    return initial;
+  }
+  return snap.data() as any;
+}
+
+/** Map point-event names to their values (mirrors gamification.ts) */
+const SERVER_POINT_VALUES: Record<string, number> = {
+  daily_login:       10,
+  topic_complete:    15,
+  quiz_pass:         50,
+  quiz_perfect:      80,
+  coding_pass:       60,
+  roadmap_complete:  200,
+  resume_scan:       80,
+  interview_complete: 100,
+  assessment_pass:   40,
+};
+
+/** Compute level from total points — mirrors gamification.ts LEVELS */
+function computeLevel(points: number): { level: number; title: string } {
+  if (points >= 2000) return { level: 6, title: 'Master' };
+  if (points >= 1000) return { level: 5, title: 'Expert' };
+  if (points >= 600)  return { level: 4, title: 'Specialist' };
+  if (points >= 300)  return { level: 3, title: 'Explorer' };
+  if (points >= 100)  return { level: 2, title: 'Novice' };
+  return { level: 1, title: 'Beginner' };
+}
+
+// ─── END GAMIFICATION HELPERS ───────────────────────────────────────────────
 
 // Setup Vite Dev server or production static serving
 async function startServer() {

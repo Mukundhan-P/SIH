@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import type { StudentProfile, DayModule, MCQQuestion, CodingExam, DayLessonContent, AdaptiveLockedRoadmap, RoadmapProgress } from '../types';
 import { readStats, getWeeklyActivityPoints, recordTopicCompleted } from '../lib/userStats';
+import { awardPoints } from '../lib/gamification';
 
 const WeeklyActivityChart = () => {
   const points = getWeeklyActivityPoints();
@@ -617,6 +618,15 @@ export default function LockedRoadmap({
     if (score >= 60) {
       addProctorLog(`✅ MCQ Quiz Passed! Score: ${score}% (Passing score: 60%)`);
       setFlowStep('result');
+
+      // Award gamification points for quiz (once per dayId)
+      if (activeDay) {
+        const token = localStorage.getItem('halohex_token');
+        if (token) {
+          const event = score >= 90 ? 'quiz_perfect' : 'quiz_pass';
+          awardPoints(event, `quiz_${activeDay.id}`, token).catch(() => {});
+        }
+      }
     } else {
       addProctorLog(`❌ MCQ Quiz Failed. Score: ${score}% (Passing score: 60%). Please review the concepts.`);
       setFlowStep('result');
@@ -723,6 +733,12 @@ export default function LockedRoadmap({
     setProgress(updated);
     localStorage.setItem(`roadmap_progress_${selectedCourse}`, JSON.stringify(updated));
     recordTopicCompleted();
+
+    // Award gamification points for topic/module completion (once per dayId)
+    const token = localStorage.getItem('halohex_token');
+    if (token) {
+      awardPoints('topic_complete', `topic_${dayId}`, token).catch(() => {});
+    }
   };
 
   // Request full screen

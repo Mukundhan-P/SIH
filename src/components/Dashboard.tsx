@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import type { StudentProfile, ChatMessage, CareerRecommendation, StudyTask, ResumeAnalysis, InterviewRoundState } from '../types';
 import { calculateLearningDNA } from '../lib/learningDnaEngine';
 import { recordLogin, flushSessionHours, readStats } from '../lib/userStats';
+import { awardPoints } from '../lib/gamification';
 import AIPersonalityAvatar from './AIPersonalityAvatar';
 import AnalyticsCharts from './AnalyticsCharts';
 import RevisionPredictor from './RevisionPredictor';
@@ -14,6 +15,7 @@ import DatabaseInspector from './DatabaseInspector';
 import Leaderboard from './Leaderboard';
 import CompareCareers from './CompareCareers';
 import CodeEditor from './CodeEditor';
+import DailyCheckin from './DailyCheckin';
 import {
   MessageSquare, Compass, Calendar, FileText, Cpu, BarChart2, BookOpen, GraduationCap,
   Sparkles, Flame, Award, ChevronRight, ChevronLeft, LogOut, CheckCircle, Volume2, Globe, Send, HelpCircle, ArrowRight, ShieldCheck, Target, ListChecks, User, Sun, Moon, Database, Settings, Trophy, ArrowRightLeft, Terminal, Brain
@@ -197,6 +199,10 @@ export default function Dashboard({ profile, onProfileUpdate, onLogout, theme = 
       flushSessionHours();
       setStreakDays(readStats().streak);
     }, 5 * 60 * 1000);
+
+    // DailyCheckin component now handles the interactive claim — remove silent background award
+    // (awardPoints is called inside DailyCheckin when user clicks 'Claim')
+
     return () => {
       window.removeEventListener('beforeunload', handleUnload);
       clearInterval(flushInterval);
@@ -403,6 +409,11 @@ export default function Dashboard({ profile, onProfileUpdate, onLogout, theme = 
             { name: 'ATS Overlord', desc: 'Scanned your resume using ATS lasers', icon: FileText },
           ];
         });
+        // Award gamification points for resume scan (once)
+        const token = localStorage.getItem('halohex_token');
+        if (token) {
+          awardPoints('resume_scan', 'resume_scan_once', token).catch(() => {});
+        }
       }
     } catch (err) {
       console.error("Failed to analyze resume:", err);
@@ -517,6 +528,12 @@ export default function Dashboard({ profile, onProfileUpdate, onLogout, theme = 
           { name: 'Elite Talker', desc: 'Completed a full 5-question AI panel interview', icon: Cpu },
         ];
       });
+      // Award gamification points for completing a full interview (once per interview session)
+      const token = localStorage.getItem('halohex_token');
+      if (token) {
+        const interviewId = `interview_${Date.now()}`;
+        awardPoints('interview_complete', interviewId, token).catch(() => {});
+      }
     }
   };
 
@@ -1250,6 +1267,8 @@ export default function Dashboard({ profile, onProfileUpdate, onLogout, theme = 
           )}
         </AnimatePresence>
       </main>
+      {/* Floating Daily Check-In — always visible on all tabs */}
+      <DailyCheckin />
     </div>
   );
 }

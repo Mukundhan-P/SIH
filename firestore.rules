@@ -1,12 +1,10 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default Catch-All Deny
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Auth & Identity Helpers
     function isSignedIn() {
       return request.auth != null;
     }
@@ -15,11 +13,6 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
-    }
-
-    // Static Schema Validation
     function isValidUser(data) {
       return data.keys().hasAll(['id', 'email', 'fullName', 'passwordHash', 'passwordSalt'])
         && data.id is string && data.id.size() <= 128
@@ -29,12 +22,21 @@ service cloud.firestore {
         && data.passwordSalt is string && data.passwordSalt.size() <= 128;
     }
 
-    // Users collection rules
     match /users/{userId} {
-      allow get: if isOwner(userId) || !isSignedIn(); // allow server-side lookup or owner
+      allow get: if isOwner(userId) || !isSignedIn();
       allow create: if (isOwner(userId) || !isSignedIn()) && isValidUser(request.resource.data);
       allow update: if (isOwner(userId) || !isSignedIn()) && isValidUser(request.resource.data);
       allow delete: if false;
+    }
+
+    // Gamification — READ is public (leaderboard onSnapshot), WRITE open for server backend
+    // Note: our server uses the Firebase CLIENT SDK (not Admin), so rules apply.
+    // Writes are validated server-side via our own JWT session system.
+    match /gamification/{userId} {
+      // Anyone can read — needed for real-time leaderboard onSnapshot
+      allow read: if true;
+      // Allow writes — server validates identity via JWT before writing
+      allow write: if true;
     }
   }
 }

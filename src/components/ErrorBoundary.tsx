@@ -7,6 +7,10 @@ interface State {
 }
 
 export default class ErrorBoundary extends React.Component<{ children: React.ReactNode }, State> {
+  declare state: State;
+  declare setState: React.Component<{ children: React.ReactNode }, State>['setState'];
+  declare props: Readonly<{ children: React.ReactNode }>;
+
   constructor(props: { children: React.ReactNode }) {
     super(props);
     this.state = { hasError: false, error: null, info: '' };

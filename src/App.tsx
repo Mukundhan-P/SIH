@@ -153,6 +153,9 @@ export default function App() {
             const data = await res.json();
             setToken(savedToken);
             setUser({ email: data.email, fullName: data.fullName });
+            // Store user identity for per-user gamification keys
+            localStorage.setItem('halohex_user_id', data.id || data.email);
+            localStorage.setItem('halohex_user_email', data.email);
             if (data.profile) {
               setProfile(data.profile);
               localStorage.setItem('halohex_profile', JSON.stringify(data.profile));
@@ -186,6 +189,8 @@ export default function App() {
     setUser({ email: loginUser.email, fullName: loginUser.fullName });
     try {
       localStorage.setItem('halohex_token', newToken);
+      localStorage.setItem('halohex_user_id', loginUser.profile?.id || loginUser.email);
+      localStorage.setItem('halohex_user_email', loginUser.email);
     } catch (e) {
       console.error(e);
     }
@@ -243,6 +248,10 @@ export default function App() {
     try {
       localStorage.removeItem('halohex_profile');
       localStorage.removeItem('halohex_token');
+      localStorage.removeItem('halohex_profile');
+      localStorage.removeItem('halohex_user_id');
+      localStorage.removeItem('halohex_user_email');
+
       // Clear all cached course progresses and structures to prevent leakage between accounts
       for (let i = localStorage.length - 1; i >= 0; i--) {
         const key = localStorage.key(i);
