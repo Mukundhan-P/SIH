@@ -1,0 +1,12 @@
+[
+  {
+    "id": "1e956f05-ef51-41ef-9492-4ceb662fe3dd",
+    "email": "naren@gmail.com",
+    "fullName": "Naren",
+    "passwordHash": "7913213ccd3863f46452596153c8d48138afe6faf209d01b16b7e192b6bf44a182f270f7d34778022a91cd564681efe28a48e18f40ccabf2375311cdd2bc910e",
+    "passwordSalt": "e42fca300a38471ca2cf6e401e6360c1",
+    "failedAttempts": 0,
+    "profile": null,
+    "sessionToken": "c141a735a08e7ab8260f31e8b611dbe5c2b3aaca8edaaaaecfe1862cfc6254d7"
+  }
+]

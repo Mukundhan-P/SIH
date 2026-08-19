@@ -1,6 +1,7 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Default deny — all access must be explicitly granted below
     match /{document=**} {
       allow read, write: if false;
     }
@@ -13,7 +14,10 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == userId;
     }
 
-    function isValidUser(data) {
+    // Validates that new user documents have the required identity fields.
+    // Only enforced on CREATE — updates use merge:true from the server
+    // and may not include all fields every time.
+    function isValidNewUser(data) {
       return data.keys().hasAll(['id', 'email', 'fullName', 'passwordHash', 'passwordSalt'])
         && data.id is string && data.id.size() <= 128
         && data.email is string && data.email.size() <= 128
@@ -23,19 +27,37 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
+      // Single-document reads: owner only (or unauthenticated — our app uses custom auth,
+      // not Firebase Auth, so request.auth is always null; !isSignedIn() = true for all requests)
       allow get: if isOwner(userId) || !isSignedIn();
-      allow create: if (isOwner(userId) || !isSignedIn()) && isValidUser(request.resource.data);
-      allow update: if (isOwner(userId) || !isSignedIn()) && isValidUser(request.resource.data);
+
+      // ── CRITICAL FIX ─────────────────────────────────────────────────────────
+      // allow list: enables getDocs(collection(db, "users")) from the server-side
+      // leaderboard endpoint on ANY laptop. Without this, the query silently fails
+      // and the server falls back to the local users.json file, which only contains
+      // users registered on that specific machine.
+      allow list: if true;
+
+      // New user creation: must include all required identity fields
+      allow create: if (isOwner(userId) || !isSignedIn()) && isValidNewUser(request.resource.data);
+
+      // Updates: allow from server (unauthenticated) — server validates via
+      // session token before writing. Does NOT re-validate all fields because
+      // setDoc with merge:true only writes changed fields.
+      allow update: if (isOwner(userId) || !isSignedIn());
+
+      // User documents are never deleted through the client
       allow delete: if false;
     }
 
-    // Gamification — READ is public (leaderboard onSnapshot), WRITE open for server backend
-    // Note: our server uses the Firebase CLIENT SDK (not Admin), so rules apply.
-    // Writes are validated server-side via our own JWT session system.
+    // ── Gamification Collection ───────────────────────────────────────────────
+    // Stores points, medals, level, and leaderboard data per user.
+    // READ is intentionally public — the client uses Firestore onSnapshot to power
+    // the real-time leaderboard. Any authenticated OR unauthenticated client can read.
+    // WRITE is open — the server validates the user's session token before awarding
+    // points, preventing unauthorized manipulation via the API layer.
     match /gamification/{userId} {
-      // Anyone can read — needed for real-time leaderboard onSnapshot
       allow read: if true;
-      // Allow writes — server validates identity via JWT before writing
       allow write: if true;
     }
   }

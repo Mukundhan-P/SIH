@@ -330,6 +330,28 @@ app.post("/api/auth/register", async (req: Request, res: Response) => {
 
     await saveUser(newUser);
 
+    // ── CRITICAL FIX: Create gamification document immediately on registration ──
+    // Without this, the new user's entry never appears in the Firestore `gamification`
+    // collection (and therefore never shows on any other laptop's leaderboard)
+    // until they earn their very first point. Creating it here ensures cross-laptop
+    // visibility from the moment of sign-up.
+    const db = initFirebase();
+    if (db && isFirebaseEnabled) {
+      try {
+        const userInfo = {
+          name: sanitizedFullName,
+          email: sanitizedEmail,
+          college: defaultProfile.college || '',
+          dreamCareer: defaultProfile.dreamCareer || preferredDomain || '',
+        };
+        await getOrInitGamificationDoc(db, newUser.id, userInfo);
+        console.log(`[REGISTRATION] ✅ Gamification doc created for new user: ${sanitizedEmail} (uid: ${newUser.id})`);
+      } catch (gamErr: any) {
+        // Non-fatal: log but don't fail the registration
+        console.error(`[REGISTRATION] ⚠️ Could not create gamification doc for ${sanitizedEmail}:`, gamErr?.message || gamErr);
+      }
+    }
+
     res.status(201).json({ success: true, message: "Account created successfully." });
   } catch (err) {
     console.error("Registration error:", err);
@@ -644,8 +666,12 @@ app.get("/api/leaderboard", async (_req: Request, res: Response) => {
       users = readUsers();
     }
 
+    // ── CRITICAL FIX: include ALL registered users, not just those with points > 0 ──
+    // Removing the `> 0` filter ensures that newly registered users (from any laptop)
+    // appear on the leaderboard immediately, even before they earn any points.
+    // Users are sorted by points descending so top earners still appear first.
     const leaderboard = users
-      .filter(u => (u.userData?.points ?? u.userData?.xp ?? 0) > 0)
+      .filter(u => u.email && u.fullName) // only filter out malformed records
       .map(u => {
         const pts = u.userData?.points || u.userData?.xp || 0;
         const awarded = u.userData?.awardedEvents || [];

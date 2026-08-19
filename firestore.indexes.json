@@ -1,1 +1,13 @@
-﻿{"indexes":[],"fieldOverrides":[]}
+{
+  "indexes": [
+    {
+      "collectionGroup": "gamification",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "points", "order": "DESCENDING" },
+        { "fieldPath": "__name__", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

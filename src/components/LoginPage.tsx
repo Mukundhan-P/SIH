@@ -8,6 +8,18 @@ interface LoginPageProps {
   theme: 'light' | 'dark';
 }
 
+async function safeJson(res: Response) {
+  const text = await res.text();
+  if (!text || text.trim() === '') {
+    throw new Error('Server returned an empty response. Make sure the server is running and .env.local is set up correctly.');
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Server error: ${text.substring(0, 120)}`);
+  }
+}
+
 export default function LoginPage({ onLoginSuccess, theme }: LoginPageProps) {
   const [mode, setMode] = useState<'login' | 'signup' | 'forgot'>('login');
   const [email, setEmail] = useState('');
@@ -80,7 +92,7 @@ export default function LoginPage({ onLoginSuccess, theme }: LoginPageProps) {
         body: JSON.stringify({ email, password, preferredDomain })
       });
 
-      const data = await res.json();
+      const data = await safeJson(res);
 
       if (!res.ok) {
         throw new Error(data.error || 'Authentication failed');
@@ -122,7 +134,7 @@ export default function LoginPage({ onLoginSuccess, theme }: LoginPageProps) {
         body: JSON.stringify({ email: guestEmail, password: guestPassword })
       });
 
-      const data = await res.json();
+      const data = await safeJson(res);
 
       if (!res.ok) {
         throw new Error(data.error || 'Failed to start demo session');
@@ -172,7 +184,7 @@ export default function LoginPage({ onLoginSuccess, theme }: LoginPageProps) {
         body: JSON.stringify({ email, password, fullName, preferredDomain })
       });
 
-      const data = await res.json();
+      const data = await safeJson(res);
 
       if (!res.ok) {
         throw new Error(data.error || 'Account creation failed');
@@ -210,7 +222,7 @@ export default function LoginPage({ onLoginSuccess, theme }: LoginPageProps) {
         body: JSON.stringify({ email })
       });
 
-      const data = await res.json();
+      const data = await safeJson(res);
 
       if (!res.ok) {
         throw new Error(data.error || 'Password reset request failed');
